@@ -438,7 +438,7 @@ fn apply_screen_mode_globals(screen_mode: ScreenMode) {
     crate::theme::cache::set_terminal_native_lock(minimal);
 }
 /// Startup theme state for the *requested* screen mode, step 1 of the two-phase startup theme handshake (step 2: [`finish_theme_after_probe`]).
-/// Must run before `init_terminal`, whose `apply_cursor_color()` reads the state installed here.
+/// Must run before `init_terminal`, whose cursor, background, and foreground applies read the state installed here.
 fn engage_startup_theme(screen_mode: ScreenMode) {
     if screen_mode.is_minimal() {
         crate::theme::cache::set_terminal_native_lock(true);
@@ -972,6 +972,8 @@ pub async fn run(
     let alt_screen_config_mode = config_watcher.current().alt_screen;
     let term_ctx = crate::terminal::terminal_context();
     let is_control_mode = crate::terminal::detect_tmux_control_mode(term_ctx);
+    // Before any OSC 10/11. Control mode must send those sequences bare.
+    crate::terminal::set_session_color_control_mode(is_control_mode);
     let alt_screen_wants_fullscreen = crate::terminal::determine_alt_screen_policy(
         args.no_alt_screen,
         alt_screen_config_mode,

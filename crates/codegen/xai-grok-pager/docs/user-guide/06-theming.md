@@ -147,11 +147,15 @@ This works in terminals that support OSC 12 (most modern terminals).
 
 ## Terminal background
 
-Grok sets the terminal's default background to the current theme's canvas with OSC 11, on startup and again whenever the theme changes. Margins and rounded window corners use that color, so they follow `/theme` instead of staying on the profile color. The `terminal` theme does not send OSC 11: its canvas is the profile background.
+Grok sets the terminal's default background to the theme canvas with OSC 11, and the default foreground to the theme's primary text with OSC 10, on startup and whenever the theme changes. iTerm's rounded corners and Minimal tab fill follow that background. Minimal tab labels follow that foreground when iTerm is not already extending its own margin color. The `terminal` theme sends neither sequence.
 
-On exit Grok sends OSC 111, which restores the profile background. Inside tmux 3.3 or later the sequences are DCS-wrapped. A normal tmux client needs `allow-passthrough on` to deliver that wrapper.
+On exit Grok sends OSC 111 and OSC 110, which restore the profile background and foreground.
 
-iTerm's Minimal tab bar uses that same background. Its labels use the terminal's default foreground, so Grok also sets that foreground with OSC 10 to the theme's primary text color and restores it with OSC 110. The `terminal` theme sends neither sequence. A profile Tab Color, or OSC `1337 ; SetColors=tab=…`, still replaces the tab fill and then picks black or white text from that fill's brightness.
+In tmux control mode (`tmux -CC`) both sequences are bare. tmux copies them into that pane's `%output`, and iTerm applies them to that pane. `allow-passthrough` does not change this path.
+
+A normal tmux client consumes a bare OSC 10 or OSC 11. Grok wraps them for tmux 3.3 or later, and that client needs `allow-passthrough on`. The wrapper changes the outer terminal's default foreground and background for the whole window. Other panes, and a status line that uses the default colors, follow along until Grok exits or switches to the `terminal` theme.
+
+A profile Tab Color, or OSC `1337 ; SetColors=tab=…`, still replaces the tab fill and then picks black or white text from that fill's brightness.
 
 ---
 

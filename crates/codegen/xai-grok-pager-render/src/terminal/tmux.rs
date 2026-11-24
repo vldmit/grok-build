@@ -41,11 +41,42 @@ pub fn passthrough_available(ctx: &TerminalContext) -> bool {
     ctx.is_tmux_backed() && ctx.is_tmux_version_or_later(3, 3)
 }
 
-/// OSC 10 and OSC 11 are wrapped only in passthrough-capable tmux that is not an editor `:terminal`.
-/// tmux consumes either sequence when it arrives bare.
+/// OSC 11 queries are wrapped only in passthrough-capable tmux that is not an editor `:terminal`.
+/// A bare query is answered by tmux itself. The wrap is only the fallback that asks the outer terminal.
 #[must_use]
 pub fn should_wrap_osc11(ctx: &TerminalContext) -> bool {
     passthrough_available(ctx) && ctx.embedded_editor.is_none()
+}
+
+/// Set from startup once tmux control mode has been probed.
+/// Session-color OSC must be bare in `tmux -CC`: control mode copies pane bytes into `%output` verbatim and does not unwrap a DCS `tmux;` envelope, whether or not `allow-passthrough` is on.
+static SESSION_COLOR_CONTROL_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_session_color_control_mode(control_mode: bool) {
+    SESSION_COLOR_CONTROL_MODE.store(control_mode, std::sync::atomic::Ordering::Release);
+}
+
+#[must_use]
+pub fn session_color_control_mode() -> bool {
+    SESSION_COLOR_CONTROL_MODE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Wrap OSC 10/11/110/111 only for a normal tmux client that can passthrough.
+/// `tmux -CC` must receive the sequence bare. An editor `:terminal` must not be wrapped either.
+#[must_use]
+pub fn should_wrap_session_color(ctx: &TerminalContext, control_mode: bool) -> bool {
+    !control_mode && passthrough_available(ctx) && ctx.embedded_editor.is_none()
+}
+
+/// Bare sequence, or the same bytes inside the tmux DCS passthrough envelope.
+#[must_use]
+pub fn encode_session_color(sequence: &str, wrap: bool) -> String {
+    if wrap {
+        tmux_passthrough_str(sequence)
+    } else {
+        sequence.to_string()
+    }
 }
 
 /// DEC 2026 synchronized output is skipped only when tmux is the immediate terminal, in any tmux version: tmux repaints
@@ -131,6 +162,39 @@ mod tests {
         };
         assert!(passthrough_available(&nvim));
         assert!(!should_wrap_osc11(&nvim));
+        assert!(!should_wrap_session_color(&nvim, false));
+    }
+
+    #[test]
+    fn session_color_stays_bare_in_control_mode_and_before_tmux_33() {
+        let tmux_38 = TerminalContext {
+            multiplexer: MultiplexerKind::Tmux,
+            tmux_version: Some("tmux 3.8".into()),
+            ..Default::default()
+        };
+        assert!(should_wrap_session_color(&tmux_38, false));
+        assert!(!should_wrap_session_color(&tmux_38, true));
+
+        let tmux_32 = TerminalContext {
+            multiplexer: MultiplexerKind::Tmux,
+            tmux_version: Some("tmux 3.2".into()),
+            ..Default::default()
+        };
+        assert!(!should_wrap_session_color(&tmux_32, false));
+        assert!(!should_wrap_session_color(
+            &TerminalContext::default(),
+            false
+        ));
+    }
+
+    #[test]
+    fn encode_session_color_wraps_only_when_asked() {
+        let bare = "\x1b]11;rgb:14/14/14\x07";
+        assert_eq!(encode_session_color(bare, false), bare);
+        assert_eq!(
+            encode_session_color(bare, true),
+            "\x1bPtmux;\x1b\x1b]11;rgb:14/14/14\x07\x1b\\"
+        );
     }
 
     #[test]

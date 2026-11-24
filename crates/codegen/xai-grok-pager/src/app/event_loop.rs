@@ -446,6 +446,8 @@ fn suspend_for_child(
         }
     });
     let _ = crossterm::terminal::disable_raw_mode();
+    // The child owns the tty. Drop our OSC 10/11 first, then send them again once the loop resumes.
+    crate::theme::invalidate_session_colors_for_child();
     run_child();
     let _ = crossterm::terminal::enable_raw_mode();
     if screen_mode.is_fullscreen() {
@@ -1985,6 +1987,10 @@ pub(crate) async fn run(
             super::pop_gboom_keyboard_flags(&app.escape_writer);
             gboom_keyboard_pushed = false;
             app.gboom_release_all_games();
+        }
+        if crate::theme::take_session_colors_invalidated() {
+            background_color_on_wire = None;
+            foreground_color_on_wire = None;
         }
         let cursor_color_wanted = crate::theme::cursor_color_escape();
         if cursor_color_wanted != cursor_color_on_wire {
