@@ -456,6 +456,8 @@ fn finish_theme_after_probe(requested_minimal: bool, effective_mode: ScreenMode)
         let late_theme = crate::theme::cache::resolve_initial_theme_no_osc11();
         crate::theme::cache::set(late_theme);
         crate::theme::apply_cursor_color();
+        crate::theme::apply_background_color();
+        crate::theme::apply_foreground_color();
         mode_switch::mark_theme_resolved();
         tracing::info!(?late_theme, "minimal downgrade: resolved regular theme");
     }
@@ -1578,6 +1580,8 @@ fn init_terminal(
         };
         startup_typeahead.extend(event_loop::capture_startup_typeahead(drain_timeout));
         crate::theme::apply_cursor_color();
+        crate::theme::apply_background_color();
+        crate::theme::apply_foreground_color();
         let ctx = crate::terminal::terminal_context();
         let skip_reason: Option<&str> =
             ctx.kitty_skip_reason()

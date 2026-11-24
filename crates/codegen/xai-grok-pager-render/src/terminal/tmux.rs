@@ -41,7 +41,8 @@ pub fn passthrough_available(ctx: &TerminalContext) -> bool {
     ctx.is_tmux_backed() && ctx.is_tmux_version_or_later(3, 3)
 }
 
-/// OSC 11 is wrapped only in passthrough-capable tmux that is not an editor `:terminal`.
+/// OSC 10 and OSC 11 are wrapped only in passthrough-capable tmux that is not an editor `:terminal`.
+/// tmux consumes either sequence when it arrives bare.
 #[must_use]
 pub fn should_wrap_osc11(ctx: &TerminalContext) -> bool {
     passthrough_available(ctx) && ctx.embedded_editor.is_none()

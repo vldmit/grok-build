@@ -145,6 +145,14 @@ Grok sets your terminal cursor to the current theme's `accent_user` color using 
 
 This works in terminals that support OSC 12 (most modern terminals).
 
+## Terminal background
+
+Grok sets the terminal's default background to the current theme's canvas with OSC 11, on startup and again whenever the theme changes. Margins and rounded window corners use that color, so they follow `/theme` instead of staying on the profile color. The `terminal` theme does not send OSC 11: its canvas is the profile background.
+
+On exit Grok sends OSC 111, which restores the profile background. Inside tmux 3.3 or later the sequences are DCS-wrapped. A normal tmux client needs `allow-passthrough on` to deliver that wrapper.
+
+iTerm's Minimal tab bar uses that same background. Its labels use the terminal's default foreground, so Grok also sets that foreground with OSC 10 to the theme's primary text color and restores it with OSC 110. The `terminal` theme sends neither sequence. A profile Tab Color, or OSC `1337 ; SetColors=tab=…`, still replaces the tab fill and then picks black or white text from that fill's brightness.
+
 ---
 
 ## Compact Mode
