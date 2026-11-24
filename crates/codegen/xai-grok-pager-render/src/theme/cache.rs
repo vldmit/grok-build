@@ -305,6 +305,8 @@ pub fn reset_for_test() {
     // A test that painted an RGB cursor must not leak the latch into the
     // next test's zero-cursor-escape assertions.
     super::set_cursor_color_applied_for_test(false);
+    super::set_background_color_applied_for_test(false);
+    super::set_foreground_color_applied_for_test(false);
     *AUTO_THEME_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
@@ -497,14 +499,17 @@ mod tests {
         });
     }
 
-    /// A test that painted an RGB cursor must not leak the OSC 12 latch into
-    /// the next test's zero-cursor-escape assertions.
+    /// A test that painted an RGB cursor, background, or foreground must not leak that latch into the next test.
     #[test]
-    fn reset_for_test_clears_cursor_color_latch() {
+    fn reset_for_test_clears_session_color_latches() {
         with_test_env(|| {
             super::super::set_cursor_color_applied_for_test(true);
+            super::super::set_background_color_applied_for_test(true);
+            super::super::set_foreground_color_applied_for_test(true);
             reset_for_test();
             assert!(!super::super::cursor_color_applied_for_test());
+            assert!(!super::super::background_color_applied_for_test());
+            assert!(!super::super::foreground_color_applied_for_test());
         });
     }
 

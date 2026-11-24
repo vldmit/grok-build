@@ -446,6 +446,8 @@ fn suspend_for_child(
         }
     });
     let _ = crossterm::terminal::disable_raw_mode();
+    // The child owns the tty. Drop our OSC 10/11 first, then send them again once the loop resumes.
+    crate::theme::invalidate_session_colors_for_child();
     run_child();
     let _ = crossterm::terminal::enable_raw_mode();
     if screen_mode.is_fullscreen() {
@@ -1653,6 +1655,8 @@ pub(crate) async fn run(
     let ack_deadlines = crate::app::prompt_ack::PromptAckDeadlines::from_process_env();
     let mut gboom_keyboard_pushed = false;
     let mut cursor_color_on_wire = crate::theme::cursor_color_escape();
+    let mut background_color_on_wire = crate::theme::background_color_escape();
+    let mut foreground_color_on_wire = crate::theme::foreground_color_escape();
     const BILLING_POLL_INTERVAL: Duration = Duration::from_secs(30);
     let mut billing_poll_at: Option<Instant> = None;
     let mut status_line_refresh_interval: Option<Duration> =
@@ -1984,6 +1988,10 @@ pub(crate) async fn run(
             gboom_keyboard_pushed = false;
             app.gboom_release_all_games();
         }
+        if crate::theme::take_session_colors_invalidated() {
+            background_color_on_wire = None;
+            foreground_color_on_wire = None;
+        }
         let cursor_color_wanted = crate::theme::cursor_color_escape();
         if cursor_color_wanted != cursor_color_on_wire {
             match &cursor_color_wanted {
@@ -1995,6 +2003,30 @@ pub(crate) async fn run(
             }
             crate::theme::note_cursor_color_on_wire(cursor_color_wanted.is_some());
             cursor_color_on_wire = cursor_color_wanted;
+        }
+        let background_color_wanted = crate::theme::background_color_escape();
+        if background_color_wanted != background_color_on_wire {
+            match &background_color_wanted {
+                Some(escape) => app.escape_writer.emit(escape.clone()),
+                None if background_color_on_wire.is_some() => app
+                    .escape_writer
+                    .emit(crate::theme::background_color_reset_escape()),
+                None => {}
+            }
+            crate::theme::note_background_color_on_wire(background_color_wanted.is_some());
+            background_color_on_wire = background_color_wanted;
+        }
+        let foreground_color_wanted = crate::theme::foreground_color_escape();
+        if foreground_color_wanted != foreground_color_on_wire {
+            match &foreground_color_wanted {
+                Some(escape) => app.escape_writer.emit(escape.clone()),
+                None if foreground_color_on_wire.is_some() => app
+                    .escape_writer
+                    .emit(crate::theme::foreground_color_reset_escape()),
+                None => {}
+            }
+            crate::theme::note_foreground_color_on_wire(foreground_color_wanted.is_some());
+            foreground_color_on_wire = foreground_color_wanted;
         }
         let dashboard_open = matches!(app.active_view, ActiveView::AgentDashboard);
         if !dashboard_open {

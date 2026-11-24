@@ -344,7 +344,7 @@ impl Theme {
         self.diff_delete_bg == Color::Reset && self.diff_insert_bg == Color::Reset
     }
 
-    /// In-memory only; the event loop emits OSC 12. No-op while the terminal-native lock is engaged.
+    /// In-memory only. The event loop emits OSC 12, OSC 11, and OSC 10. No-op while the terminal-native lock is engaged.
     pub fn apply_kind(kind: ThemeKind) -> ThemeKind {
         if cache::terminal_native_locked() {
             return cache::current_kind();
@@ -595,6 +595,209 @@ pub fn reset_cursor_color_if_applied() {
 
 /// The OSC 112 escape that resets the terminal cursor color to its default.
 pub const CURSOR_COLOR_RESET_ESCAPE: &str = "\x1b]112\x07";
+
+/// Gates OSC 111 the same way [`CURSOR_COLOR_APPLIED`] gates OSC 112.
+static BACKGROUND_COLOR_APPLIED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// RGB to put in OSC 10/11.
+/// `Rgb` passes through. `Indexed` uses the xterm 256-color approximation, matching the cells.
+/// Named ANSI and `Reset` return `None`: a named color is the terminal's own palette entry, and a hardcoded RGB would replace it for the whole session.
+fn session_osc_rgb(color: ratatui::style::Color) -> Option<(u8, u8, u8)> {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => Some((r, g, b)),
+        ratatui::style::Color::Indexed(index) => Some(crate::render::color::indexed_to_rgb(index)),
+        _ => None,
+    }
+}
+
+/// Bare OSC 11 for the current canvas, before tmux wrapping. `None` when `bg_base` is `Reset` or a named ANSI color (the terminal-native theme leaves the profile background, and the rounded-corner margin, alone).
+pub fn background_color_sequence() -> Option<String> {
+    let theme = Theme::current();
+    let (r, g, b) = session_osc_rgb(theme.bg_base)?;
+    Some(format!("\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x07"))
+}
+
+/// OSC 111. A normal tmux client consumes a bare OSC 11, so this is wrapped whenever [`background_color_escape`] is. `tmux -CC` stays bare.
+pub const BACKGROUND_COLOR_RESET_SEQUENCE: &str = "\x1b]111\x07";
+
+/// Normal tmux 3.3+ gets a DCS envelope. Direct terminals and `tmux -CC` get the sequence bare.
+fn wrap_session_color_sequence(sequence: &str) -> String {
+    let wrap = crate::terminal::should_wrap_session_color(
+        crate::terminal::terminal_context(),
+        crate::terminal::session_color_control_mode(),
+    );
+    crate::terminal::encode_session_color(sequence, wrap)
+}
+
+/// What to write so the terminal's own background matches the theme canvas. Margins and rounded corners use this color, not the cells Grok paints. Wrapped for a normal tmux 3.3+ client.
+pub fn background_color_escape() -> Option<String> {
+    background_color_sequence().map(|sequence| wrap_session_color_sequence(&sequence))
+}
+
+/// OSC 111, wrapped for a normal tmux 3.3+ client and bare in `tmux -CC`.
+pub fn background_color_reset_escape() -> String {
+    wrap_session_color_sequence(BACKGROUND_COLOR_RESET_SEQUENCE)
+}
+
+/// Bytes to write for the current background, updating the applied latch. `None` when the terminal should be left alone.
+fn background_color_transition() -> Option<String> {
+    use std::sync::atomic::Ordering;
+    if let Some(escape) = background_color_escape() {
+        BACKGROUND_COLOR_APPLIED.store(true, Ordering::Relaxed);
+        return Some(escape);
+    }
+    BACKGROUND_COLOR_APPLIED
+        .swap(false, Ordering::Relaxed)
+        .then(background_color_reset_escape)
+}
+
+/// Write [`background_color_escape`] straight to stderr. Startup only: the writer thread is already spawned and still idle. The event loop is the single emitter after that, including theme switches.
+pub fn apply_background_color() {
+    use std::io::Write;
+    let Some(escape) = background_color_transition() else {
+        return;
+    };
+    xai_grok_shared::stderr::with_locked_stderr(|stderr| {
+        let _ = stderr.write_all(escape.as_bytes());
+        let _ = stderr.flush();
+    });
+}
+
+/// [`reset_background_color`] gated on this session having painted the background.
+pub fn reset_background_color_if_applied() {
+    if BACKGROUND_COLOR_APPLIED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        reset_background_color();
+    }
+}
+
+/// Record that a background-color escape went out over the render wire.
+pub fn note_background_color_on_wire(applied: bool) {
+    BACKGROUND_COLOR_APPLIED.store(applied, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Test-only access to [`BACKGROUND_COLOR_APPLIED`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn background_color_applied_for_test() -> bool {
+    BACKGROUND_COLOR_APPLIED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Test-only setter for [`BACKGROUND_COLOR_APPLIED`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_background_color_applied_for_test(v: bool) {
+    BACKGROUND_COLOR_APPLIED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reset the terminal background to the profile default via OSC 111.
+pub fn reset_background_color() {
+    use std::io::Write;
+    let escape = background_color_reset_escape();
+    xai_grok_shared::stderr::with_locked_stderr(|stderr| {
+        let _ = stderr.write_all(escape.as_bytes());
+        let _ = stderr.flush();
+    });
+}
+
+/// Gates OSC 110 the same way [`BACKGROUND_COLOR_APPLIED`] gates OSC 111.
+static FOREGROUND_COLOR_APPLIED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Bare OSC 10 for the theme's primary text, before tmux wrapping.
+/// `None` when `text_primary` is `Reset` or a named ANSI color.
+/// iTerm's Minimal tab labels use this default foreground when no margin color is set, so they follow the theme when OSC 11 recolors the tab bar.
+pub fn foreground_color_sequence() -> Option<String> {
+    let theme = Theme::current();
+    let (r, g, b) = session_osc_rgb(theme.text_primary)?;
+    Some(format!("\x1b]10;rgb:{r:02x}/{g:02x}/{b:02x}\x07"))
+}
+
+/// OSC 110. Wrapped whenever [`foreground_color_escape`] is, for the same tmux reason as OSC 111.
+pub const FOREGROUND_COLOR_RESET_SEQUENCE: &str = "\x1b]110\x07";
+
+/// What to write so the terminal's default foreground matches the theme's primary text. Wrapped for a normal tmux 3.3+ client.
+pub fn foreground_color_escape() -> Option<String> {
+    foreground_color_sequence().map(|sequence| wrap_session_color_sequence(&sequence))
+}
+
+/// OSC 110, wrapped for a normal tmux 3.3+ client and bare in `tmux -CC`.
+pub fn foreground_color_reset_escape() -> String {
+    wrap_session_color_sequence(FOREGROUND_COLOR_RESET_SEQUENCE)
+}
+
+/// Bytes to write for the current foreground, updating the applied latch. `None` when the terminal should be left alone.
+fn foreground_color_transition() -> Option<String> {
+    use std::sync::atomic::Ordering;
+    if let Some(escape) = foreground_color_escape() {
+        FOREGROUND_COLOR_APPLIED.store(true, Ordering::Relaxed);
+        return Some(escape);
+    }
+    FOREGROUND_COLOR_APPLIED
+        .swap(false, Ordering::Relaxed)
+        .then(foreground_color_reset_escape)
+}
+
+/// Write [`foreground_color_escape`] straight to stderr. Startup only: the writer thread is already spawned and still idle. The event loop is the single emitter after that, including theme switches.
+pub fn apply_foreground_color() {
+    use std::io::Write;
+    let Some(escape) = foreground_color_transition() else {
+        return;
+    };
+    xai_grok_shared::stderr::with_locked_stderr(|stderr| {
+        let _ = stderr.write_all(escape.as_bytes());
+        let _ = stderr.flush();
+    });
+}
+
+/// [`reset_foreground_color`] gated on this session having painted the foreground.
+pub fn reset_foreground_color_if_applied() {
+    if FOREGROUND_COLOR_APPLIED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        reset_foreground_color();
+    }
+}
+
+/// Record that a foreground-color escape went out over the render wire.
+pub fn note_foreground_color_on_wire(applied: bool) {
+    FOREGROUND_COLOR_APPLIED.store(applied, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Test-only access to [`FOREGROUND_COLOR_APPLIED`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn foreground_color_applied_for_test() -> bool {
+    FOREGROUND_COLOR_APPLIED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Test-only setter for [`FOREGROUND_COLOR_APPLIED`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_foreground_color_applied_for_test(v: bool) {
+    FOREGROUND_COLOR_APPLIED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reset the terminal foreground to the profile default via OSC 110.
+pub fn reset_foreground_color() {
+    use std::io::Write;
+    let escape = foreground_color_reset_escape();
+    xai_grok_shared::stderr::with_locked_stderr(|stderr| {
+        let _ = stderr.write_all(escape.as_bytes());
+        let _ = stderr.flush();
+    });
+}
+
+/// Set when a child is about to own the tty. The event loop clears its remembered OSC 10/11 and sends them again after the child returns.
+static SESSION_COLORS_INVALIDATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Restore the profile foreground and background before an external editor or pager runs, and ask the event loop to send the theme colors again afterwards.
+pub fn invalidate_session_colors_for_child() {
+    reset_foreground_color_if_applied();
+    reset_background_color_if_applied();
+    SESSION_COLORS_INVALIDATED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// `true` once after [`invalidate_session_colors_for_child`]. The caller forgets the sequences it thinks are on the wire.
+#[must_use]
+pub fn take_session_colors_invalidated() -> bool {
+    SESSION_COLORS_INVALIDATED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
 
 /// Record that a cursor-color escape went out over the render wire (the event
 /// loop's queued emitter, which bypasses [`apply_cursor_color`]), keeping
@@ -1230,5 +1433,109 @@ mod tests {
             !cursor_color_applied_for_test(),
             "apply on a Reset accent must clear a previously-painted flag"
         );
+    }
+
+    /// GrokNight's canvas is `#141414`. The terminal theme's `bg_base` is `Reset`, so the profile background stays put.
+    #[test]
+    fn background_color_sequence_follows_canvas() {
+        let _guard = cache::pin_theme();
+        cache::set(ThemeKind::GrokNight);
+        assert_eq!(
+            background_color_sequence().as_deref(),
+            Some("\x1b]11;rgb:14/14/14\x07")
+        );
+
+        cache::set(ThemeKind::Terminal);
+        assert_eq!(background_color_sequence(), None);
+    }
+
+    /// Same latch rules as the cursor: a Reset canvas never marks the background painted, and it clears a prior paint exactly once.
+    #[test]
+    fn background_color_gating_stays_silent_on_terminal_theme() {
+        let _guard = cache::pin_theme();
+        cache::set(ThemeKind::Terminal);
+
+        set_background_color_applied_for_test(false);
+        assert_eq!(background_color_transition(), None);
+        assert!(
+            !background_color_applied_for_test(),
+            "Reset canvas must never mark the background as painted"
+        );
+
+        set_background_color_applied_for_test(true);
+        assert_eq!(
+            background_color_transition().as_deref(),
+            Some(background_color_reset_escape().as_str())
+        );
+        assert!(
+            !background_color_applied_for_test(),
+            "apply on a Reset canvas must clear a previously-painted flag"
+        );
+    }
+
+    /// GrokNight primary text is `#e1e1e1`. TokyoNight is `#c0caf5`. GrokDay is `#262626`. The terminal theme's `text_primary` is `Reset`.
+    #[test]
+    fn foreground_color_sequence_follows_text_primary() {
+        let _guard = cache::pin_theme();
+        cache::set(ThemeKind::GrokNight);
+        assert_eq!(
+            foreground_color_sequence().as_deref(),
+            Some("\x1b]10;rgb:e1/e1/e1\x07")
+        );
+
+        cache::set(ThemeKind::TokyoNight);
+        assert_eq!(
+            foreground_color_sequence().as_deref(),
+            Some("\x1b]10;rgb:c0/ca/f5\x07")
+        );
+
+        cache::set(ThemeKind::GrokDay);
+        assert_eq!(
+            foreground_color_sequence().as_deref(),
+            Some("\x1b]10;rgb:26/26/26\x07")
+        );
+
+        cache::set(ThemeKind::Terminal);
+        assert_eq!(foreground_color_sequence(), None);
+    }
+
+    /// Same latch rules as the background: a Reset foreground never marks it painted, and it clears a prior paint exactly once.
+    #[test]
+    fn foreground_color_gating_stays_silent_on_terminal_theme() {
+        let _guard = cache::pin_theme();
+        cache::set(ThemeKind::Terminal);
+
+        set_foreground_color_applied_for_test(false);
+        assert_eq!(foreground_color_transition(), None);
+        assert!(
+            !foreground_color_applied_for_test(),
+            "Reset foreground must never mark the foreground as painted"
+        );
+
+        set_foreground_color_applied_for_test(true);
+        assert_eq!(
+            foreground_color_transition().as_deref(),
+            Some(foreground_color_reset_escape().as_str())
+        );
+        assert!(
+            !foreground_color_applied_for_test(),
+            "apply on a Reset foreground must clear a previously-painted flag"
+        );
+    }
+
+    /// 16-color themes use named ANSI. OSC 10/11 must not replace those palette entries with hardcoded RGB. `NO_COLOR` quantizes to `Reset` and stays silent too.
+    #[test]
+    fn session_color_sequences_stay_silent_for_named_ansi_and_no_color() {
+        let _guard = cache::pin_theme();
+        cache::set(ThemeKind::GrokNight);
+        color_support::set_level_for_test(color_support::ColorLevel::Basic);
+        assert_eq!(background_color_sequence(), None);
+        assert_eq!(foreground_color_sequence(), None);
+
+        color_support::set_level_for_test(color_support::ColorLevel::None);
+        assert_eq!(background_color_sequence(), None);
+        assert_eq!(foreground_color_sequence(), None);
+
+        color_support::set_level_for_test(color_support::ColorLevel::TrueColor);
     }
 }

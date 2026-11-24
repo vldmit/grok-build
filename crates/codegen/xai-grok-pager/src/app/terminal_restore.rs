@@ -74,6 +74,8 @@ pub(super) fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_r
         let _ = execute!(stderr, crossterm::terminal::EndSynchronizedUpdate);
     });
     crate::theme::reset_cursor_color_if_applied();
+    crate::theme::reset_foreground_color_if_applied();
+    crate::theme::reset_background_color_if_applied();
 
     // https://github.com/helix-editor/helix/issues/6638
     disable_mouse_paste_raw();
